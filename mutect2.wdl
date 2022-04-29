@@ -67,17 +67,6 @@ version 1.0
 ## pages at https://hub.docker.com/r/broadinstitute/* for detailed licensing information
 ## pertaining to the included programs.
 
-struct Runtime {
-    String gatk_docker
-    File? gatk_override
-    Int max_retries
-    Int preemptible
-    Int cpu
-    Int machine_mem
-    Int command_mem
-    Int disk
-    Int boot_disk_size
-}
 
 workflow Mutect2 {
     input {
@@ -104,19 +93,16 @@ workflow Mutect2 {
       String? m2_extra_filtering_args
       String? split_intervals_extra_args
       Boolean? make_bamout
-      Boolean? compress_vcfs
       File? gga_vcf
       File? gga_vcf_idx
+      String outdir 
 
       # Funcotator inputs
       Boolean? run_funcotator
       String? sequencing_center
       String? sequence_source
       String? funco_reference_version
-      String? funco_output_format
-      Boolean? funco_compress
-      Boolean? funco_use_gnomad_AF
-      File? funco_data_sources_tar_gz
+      String funco_data_sources_path
       String? funco_transcript_selection_mode
       File? funco_transcript_selection_list
       Array[String]? funco_annotation_defaults
@@ -128,9 +114,8 @@ workflow Mutect2 {
       String funco_default_output_format = "MAF"
 
       # runtime
-      String gatk_docker
-      File? gatk_override
-      String basic_bash_docker = "ubuntu:16.04"
+  #    String gatk_docker
+  #    String basic_bash_docker = "ubuntu:16.04"
       Boolean? filter_funcotations
 
       Int? preemptible
@@ -156,10 +141,10 @@ workflow Mutect2 {
     Int preemptible_or_default = select_first([preemptible, 2])
     Int max_retries_or_default = select_first([max_retries, 2])
 
-    Boolean compress = select_first([compress_vcfs, false])
+    Boolean compress = false
     Boolean run_ob_filter = select_first([run_orientation_bias_mixture_model_filter, false])
     Boolean make_bamout_or_default = select_first([make_bamout, false])
-    Boolean run_funcotator_or_default = select_first([run_funcotator, false])
+    Boolean run_funcotator_or_default = select_first([run_funcotator, true])
     Boolean filter_funcotations_or_default = select_first([filter_funcotations, true])
 
     # Disk sizes used for dynamic sizing
@@ -169,11 +154,10 @@ workflow Mutect2 {
     Int normal_reads_size = if defined(normal_reads) then ceil(size(normal_reads, "GB") + size(normal_reads_index, "GB")) else 0
 
     # If no tar is provided, the task downloads one from broads ftp server
-    Int funco_tar_size = if defined(funco_data_sources_tar_gz) then ceil(size(funco_data_sources_tar_gz, "GB") * 3) else 100
-    Int gatk_override_size = if defined(gatk_override) then ceil(size(gatk_override, "GB")) else 0
+
 
     # This is added to every task as padding, should increase if systematically you need more disk for every call
-    Int disk_pad = 10 + gatk_override_size + select_first([emergency_extra_disk,0])
+
 
     # logic about output file names -- these are the names *without* .vcf extensions
     String output_basename = basename(basename(tumor_reads, ".bam"),".cram")  #hacky way to strip either .bam or .cram
@@ -186,10 +170,6 @@ workflow Mutect2 {
     Int tumor_cram_to_bam_disk = ceil(tumor_reads_size * cram_to_bam_multiplier)
     Int normal_cram_to_bam_disk = ceil(normal_reads_size * cram_to_bam_multiplier)
 
-    Runtime standard_runtime = {"gatk_docker": gatk_docker, "gatk_override": gatk_override,
-            "max_retries": max_retries_or_default, "preemptible": preemptible_or_default, "cpu": small_task_cpu,
-            "machine_mem": small_task_mem * 1000, "command_mem": small_task_mem * 1000 - 500,
-            "disk": small_task_disk + disk_pad, "boot_disk_size": boot_disk_size}
 
     if (basename(tumor_reads) != basename(tumor_reads, ".cram")) {
         call CramToBam as TumorCramToBam {
@@ -229,7 +209,6 @@ workflow Mutect2 {
 
     Int m2_output_size = tumor_bam_size / scatter_count
     #TODO: do we need to change this disk size now that NIO is always going to happen (for the google backend only)
-    Int m2_per_scatter_size = (tumor_bam_size + normal_bam_size) + ref_size + gnomad_vcf_size + m2_output_size + disk_pad
 
     call SplitIntervals {
         input:
@@ -239,7 +218,6 @@ workflow Mutect2 {
             ref_dict = ref_dict,
             scatter_count = scatter_count,
             split_intervals_extra_args = split_intervals_extra_args,
-            runtime_params = standard_runtime
     }
 
     scatter (subintervals in SplitIntervals.interval_files ) {
@@ -254,6 +232,7 @@ workflow Mutect2 {
                 normal_bam = normal_bam,
                 normal_bai = normal_bai,
                 pon = pon,
+                outdir = outdir,
                 pon_idx = pon_idx,
                 gnomad = gnomad,
                 gnomad_idx = gnomad_idx,
@@ -267,9 +246,6 @@ workflow Mutect2 {
                 compress = compress,
                 gga_vcf = gga_vcf,
                 gga_vcf_idx = gga_vcf_idx,
-                gatk_override = gatk_override,
-                gatk_docker = gatk_docker,
-                disk_space = m2_per_scatter_size
         }
     }
 
@@ -280,7 +256,7 @@ workflow Mutect2 {
         call LearnReadOrientationModel {
             input:
                 f1r2_tar_gz = M2.f1r2_counts,
-                runtime_params = standard_runtime,
+         
                 mem = learn_read_orientation_mem
         }
     }
@@ -291,7 +267,7 @@ workflow Mutect2 {
             input_vcf_indices = M2.unfiltered_vcf_idx,
             output_name = unfiltered_name,
             compress = compress,
-            runtime_params = standard_runtime
+   
     }
 
     if (make_bamout_or_default) {
@@ -302,12 +278,10 @@ workflow Mutect2 {
                 ref_dict = ref_dict,
                 bam_outs = M2.output_bamOut,
                 output_vcf_name = basename(MergeVCFs.merged_vcf, ".vcf"),
-                runtime_params = standard_runtime,
-                disk_space = ceil(merged_bamout_size * large_input_to_output_multiplier) + disk_pad,
         }
     }
 
-    call MergeStats { input: stats = M2.stats, runtime_params = standard_runtime }
+    call MergeStats { input: stats = M2.stats}
 
     if (defined(variants_for_contamination)) {
         call MergePileupSummaries as MergeTumorPileups {
@@ -315,7 +289,6 @@ workflow Mutect2 {
                 input_tables = flatten(M2.tumor_pileups),
                 output_name = output_basename,
                 ref_dict = ref_dict,
-                runtime_params = standard_runtime
         }
 
         if (defined(normal_bam)){
@@ -324,7 +297,6 @@ workflow Mutect2 {
                     input_tables = flatten(M2.normal_pileups),
                     output_name = output_basename,
                     ref_dict = ref_dict,
-                    runtime_params = standard_runtime
             }
         }
 
@@ -332,7 +304,6 @@ workflow Mutect2 {
             input:
                 tumor_pileups = MergeTumorPileups.merged_table,
                 normal_pileups = MergeNormalPileups.merged_table,
-                runtime_params = standard_runtime
         }
     }
 
@@ -341,6 +312,7 @@ workflow Mutect2 {
             ref_fasta = ref_fasta,
             ref_fai = ref_fai,
             ref_dict = ref_dict,
+            outdir = outdir,
             intervals = intervals,
             unfiltered_vcf = MergeVCFs.merged_vcf,
             unfiltered_vcf_idx = MergeVCFs.merged_vcf_idx,
@@ -351,8 +323,7 @@ workflow Mutect2 {
             maf_segments = CalculateContamination.maf_segments,
             artifact_priors_tar_gz = LearnReadOrientationModel.artifact_prior_table,
             m2_extra_filtering_args = m2_extra_filtering_args,
-            runtime_params = standard_runtime,
-            disk_space = ceil(size(MergeVCFs.merged_vcf, "GB") * small_input_to_output_multiplier) + disk_pad
+
     }
 
     if (defined(realignment_index_bundle)) {
@@ -365,28 +336,27 @@ workflow Mutect2 {
                 compress = compress,
                 output_name = filtered_name,
                 input_vcf = Filter.filtered_vcf,
-                input_vcf_idx = Filter.filtered_vcf_idx,
-                runtime_params = standard_runtime,
+            #    input_vcf_idx = Filter.filtered_vcf_idx,
                 mem = filter_alignment_artifacts_mem
         }
     }
 
     if (run_funcotator_or_default) {
-        File funcotate_vcf_input = select_first([FilterAlignmentArtifacts.filtered_vcf, Filter.filtered_vcf])
-        File funcotate_vcf_input_index = select_first([FilterAlignmentArtifacts.filtered_vcf_idx, Filter.filtered_vcf_idx])
+        File funcotate_vcf_input = select_first([FilterAlignmentArtifacts.filtered_vcf, Filter.pass_filtered_vcf])
+      #  File funcotate_vcf_input_index = select_first([FilterAlignmentArtifacts.filtered_vcf_idx, Filter.filtered_vcf_idx])
         call Funcotate {
             input:
                 ref_fasta = ref_fasta,
                 ref_fai = ref_fai,
+                compress = compress,
                 ref_dict = ref_dict,
+                outdir=outdir,
+                output_format = funco_default_output_format,
                 input_vcf = funcotate_vcf_input,
-                input_vcf_idx = funcotate_vcf_input_index,
+           #     input_vcf_idx = funcotate_vcf_input_index,
                 reference_version = select_first([funco_reference_version, "hg19"]),
                 output_file_base_name = basename(funcotate_vcf_input, ".vcf") + ".annotated",
-                output_format = if defined(funco_output_format) then "" + funco_output_format else funco_default_output_format,
-                compress = if defined(funco_compress) then select_first([funco_compress]) else false,
-                use_gnomad = if defined(funco_use_gnomad_AF) then select_first([funco_use_gnomad_AF]) else false,
-                data_sources_tar_gz = funco_data_sources_tar_gz,
+                funco_data_sources_path = funco_data_sources_path,
                 case_id = M2.tumor_sample[0],
                 control_id = M2.normal_sample[0],
                 sequencing_center = sequencing_center,
@@ -398,20 +368,17 @@ workflow Mutect2 {
                 funcotator_excluded_fields = funcotator_excluded_fields,
                 filter_funcotations = filter_funcotations_or_default,
                 extra_args = funcotator_extra_args,
-                runtime_params = standard_runtime,
-                disk_space = ceil(size(funcotate_vcf_input, "GB") * large_input_to_output_multiplier)  + funco_tar_size + disk_pad
         }
     }
 
     output {
         File filtered_vcf = select_first([FilterAlignmentArtifacts.filtered_vcf, Filter.filtered_vcf])
         File filtered_vcf_idx = select_first([FilterAlignmentArtifacts.filtered_vcf_idx, Filter.filtered_vcf_idx])
-        File filtering_stats = Filter.filtering_stats
         File mutect_stats = MergeStats.merged_stats
         File? contamination_table = CalculateContamination.contamination_table
 
         File? funcotated_file = Funcotate.funcotated_output_file
-        File? funcotated_file_index = Funcotate.funcotated_output_file_index
+      #  File? funcotated_file_index = Funcotate.funcotated_output_file_index
         File? bamout = MergeBamOuts.merged_bam_out
         File? bamout_index = MergeBamOuts.merged_bam_out_index
         File? maf_segments = CalculateContamination.maf_segments
@@ -432,7 +399,7 @@ task CramToBam {
       Int? mem
     }
 
-    Int machine_mem = if defined(mem) then mem * 1000 else 6000
+    #Int machine_mem = if defined(mem) then mem * 1000 else 6000
 
     #Calls samtools view to do the conversion
     command {
@@ -447,9 +414,7 @@ task CramToBam {
     }
 
     runtime {
-        docker: "us.gcr.io/broad-gotc-prod/genomes-in-the-cloud:2.3.3-1513176735"
-        memory: machine_mem + " MB"
-        disks: "local-disk " + disk_size + " HDD"
+       backend:"Local"
     }
 
     output {
@@ -468,15 +433,13 @@ task SplitIntervals {
       String? split_intervals_extra_args
 
       # runtime
-      Runtime runtime_params
+     # Runtime runtime_params
     }
 
     command {
         set -e
-        export GATK_LOCAL_JAR=~{default="/root/gatk.jar" runtime_params.gatk_override}
-
         mkdir interval-files
-        gatk --java-options "-Xmx~{runtime_params.command_mem}m" SplitIntervals \
+        gatk  SplitIntervals \
             -R ~{ref_fasta} \
             ~{"-L " + intervals} \
             -scatter ~{scatter_count} \
@@ -486,13 +449,7 @@ task SplitIntervals {
     }
 
     runtime {
-        docker: runtime_params.gatk_docker
-        bootDiskSizeGb: runtime_params.boot_disk_size
-        memory: runtime_params.machine_mem + " MB"
-        disks: "local-disk " + runtime_params.disk + " HDD"
-        preemptible: runtime_params.preemptible
-        maxRetries: runtime_params.max_retries
-        cpu: runtime_params.cpu
+       backend:"Local"
     }
 
     output {
@@ -518,15 +475,14 @@ task M2 {
       Boolean? make_bamout
       Boolean? run_ob_filter
       Boolean compress
+      String outdir 
       File? gga_vcf
       File? gga_vcf_idx
       File? variants_for_contamination
       File? variants_for_contamination_idx
 
-      File? gatk_override
-
       # runtime
-      String gatk_docker
+  #    String gatk_docker
       Int? mem
       Int? preemptible
       Int? max_retries
@@ -541,8 +497,7 @@ task M2 {
     String output_stats = output_vcf + ".stats"
 
     # Mem is in units of GB but our command and memory runtime values are in MB
-    Int machine_mem = if defined(mem) then mem * 1000 else 3500
-    Int command_mem = machine_mem - 500
+
 
     parameter_meta{
       intervals: {localization_optional: true}
@@ -566,22 +521,20 @@ task M2 {
     command <<<
         set -e
 
-        export GATK_LOCAL_JAR=~{default="/root/gatk.jar" gatk_override}
 
         # We need to create these files regardless, even if they stay empty
         touch bamout.bam
         touch f1r2.tar.gz
         echo "" > normal_name.txt
 
-        gatk --java-options "-Xmx~{command_mem}m" GetSampleName -R ~{ref_fasta} -I ~{tumor_bam} -O tumor_name.txt -encode
+        gatk GetSampleName -R ~{ref_fasta} -I ~{tumor_bam} -O tumor_name.txt -encode
         tumor_command_line="-I ~{tumor_bam} -tumor `cat tumor_name.txt`"
 
         if [[ ! -z "~{normal_bam}" ]]; then
-            gatk --java-options "-Xmx~{command_mem}m" GetSampleName -R ~{ref_fasta} -I ~{normal_bam} -O normal_name.txt -encode
+            gatk GetSampleName -R ~{ref_fasta} -I ~{normal_bam} -O normal_name.txt -encode
             normal_command_line="-I ~{normal_bam} -normal `cat normal_name.txt`"
         fi
-
-        gatk --java-options "-Xmx~{command_mem}m" Mutect2 \
+        gatk Mutect2 \
             -R ~{ref_fasta} \
             $tumor_command_line \
             $normal_command_line \
@@ -605,11 +558,11 @@ task M2 {
         set +e
 
         if [[ ! -z "~{variants_for_contamination}" ]]; then
-            gatk --java-options "-Xmx~{command_mem}m" GetPileupSummaries -R ~{ref_fasta} -I ~{tumor_bam} ~{"--interval-set-rule INTERSECTION -L " + intervals} \
+            gatk GetPileupSummaries -R ~{ref_fasta} -I ~{tumor_bam} ~{"--interval-set-rule INTERSECTION -L " + intervals} \
                 -V ~{variants_for_contamination} -L ~{variants_for_contamination} -O tumor-pileups.table
 
             if [[ ! -z "~{normal_bam}" ]]; then
-                gatk --java-options "-Xmx~{command_mem}m" GetPileupSummaries -R ~{ref_fasta} -I ~{normal_bam} ~{"--interval-set-rule INTERSECTION -L " + intervals} \
+                gatk GetPileupSummaries -R ~{ref_fasta} -I ~{normal_bam} ~{"--interval-set-rule INTERSECTION -L " + intervals} \
                     -V ~{variants_for_contamination} -L ~{variants_for_contamination} -O normal-pileups.table
             fi
         fi
@@ -619,13 +572,7 @@ task M2 {
     >>>
 
     runtime {
-        docker: gatk_docker
-        bootDiskSizeGb: 12
-        memory: machine_mem + " MB"
-        disks: "local-disk " + select_first([disk_space, 100]) + if use_ssd then " SSD" else " HDD"
-        preemptible: select_first([preemptible, 10])
-        maxRetries: select_first([max_retries, 0])
-        cpu: select_first([cpu, 1])
+       backend:"Local"
     }
 
     output {
@@ -647,7 +594,6 @@ task MergeVCFs {
       Array[File] input_vcf_indices
       String output_name
       Boolean compress
-      Runtime runtime_params
     }
 
     String output_vcf = output_name + if compress then ".vcf.gz" else ".vcf"
@@ -657,18 +603,11 @@ task MergeVCFs {
     # WARNING 2015-10-28 15:01:48 GatherVcfs  Index creation not currently supported when gathering block compressed VCFs.
     command {
         set -e
-        export GATK_LOCAL_JAR=~{default="/root/gatk.jar" runtime_params.gatk_override}
-        gatk --java-options "-Xmx~{runtime_params.command_mem}m" MergeVcfs -I ~{sep=' -I ' input_vcfs} -O ~{output_vcf}
+        gatk MergeVcfs -I ~{sep=' -I ' input_vcfs} -O ~{output_vcf}
     }
 
     runtime {
-        docker: runtime_params.gatk_docker
-        bootDiskSizeGb: runtime_params.boot_disk_size
-        memory: runtime_params.machine_mem + " MB"
-        disks: "local-disk " + runtime_params.disk + " HDD"
-        preemptible: runtime_params.preemptible
-        maxRetries: runtime_params.max_retries
-        cpu: runtime_params.cpu
+       backend:"Local"
     }
 
     output {
@@ -684,7 +623,6 @@ task MergeBamOuts {
       File ref_dict
       Array[File]+ bam_outs
       String output_vcf_name
-      Runtime runtime_params
       Int? disk_space   #override to request more disk than default small task params
     }
 
@@ -692,27 +630,20 @@ task MergeBamOuts {
         # This command block assumes that there is at least one file in bam_outs.
         #  Do not call this task if len(bam_outs) == 0
         set -e
-        export GATK_LOCAL_JAR=~{default="/root/gatk.jar" runtime_params.gatk_override}
-        gatk --java-options "-Xmx~{runtime_params.command_mem}m" GatherBamFiles \
+        gatk GatherBamFiles \
             -I ~{sep=" -I " bam_outs} -O unsorted.out.bam -R ~{ref_fasta}
 
         # We must sort because adjacent scatters may have overlapping (padded) assembly regions, hence
         # overlapping bamouts
 
-        gatk --java-options "-Xmx~{runtime_params.command_mem}m" SortSam -I unsorted.out.bam \
+        gatk SortSam -I unsorted.out.bam \
             -O ~{output_vcf_name}.out.bam \
             --SORT_ORDER coordinate -VALIDATION_STRINGENCY LENIENT
-        gatk --java-options "-Xmx~{runtime_params.command_mem}m" BuildBamIndex -I ~{output_vcf_name}.out.bam -VALIDATION_STRINGENCY LENIENT
+        gatk BuildBamIndex -I ~{output_vcf_name}.out.bam -VALIDATION_STRINGENCY LENIENT
     >>>
 
     runtime {
-        docker: runtime_params.gatk_docker
-        bootDiskSizeGb: runtime_params.boot_disk_size
-        memory: runtime_params.machine_mem + " MB"
-        disks: "local-disk " + select_first([disk_space, runtime_params.disk]) + " HDD"
-        preemptible: runtime_params.preemptible
-        maxRetries: runtime_params.max_retries
-        cpu: runtime_params.cpu
+       backend:"Local"
     }
 
     output {
@@ -725,25 +656,16 @@ task MergeBamOuts {
 task MergeStats {
     input {
       Array[File]+ stats
-      Runtime runtime_params
     }
 
     command {
         set -e
-        export GATK_LOCAL_JAR=~{default="/root/gatk.jar" runtime_params.gatk_override}
-
-        gatk --java-options "-Xmx~{runtime_params.command_mem}m" MergeMutectStats \
+        gatk MergeMutectStats \
             -stats ~{sep=" -stats " stats} -O merged.stats
     }
 
     runtime {
-        docker: runtime_params.gatk_docker
-        bootDiskSizeGb: runtime_params.boot_disk_size
-        memory: runtime_params.machine_mem + " MB"
-        disks: "local-disk " + runtime_params.disk + " HDD"
-        preemptible: runtime_params.preemptible
-        maxRetries: runtime_params.max_retries
-        cpu: runtime_params.cpu
+       backend:"Local"
     }
 
     output {
@@ -756,27 +678,18 @@ task MergePileupSummaries {
       Array[File] input_tables
       String output_name
       File ref_dict
-      Runtime runtime_params
     }
 
     command {
         set -e
-        export GATK_LOCAL_JAR=~{default="/root/gatk.jar" runtime_params.gatk_override}
-
-        gatk --java-options "-Xmx~{runtime_params.command_mem}m" GatherPileupSummaries \
+        gatk GatherPileupSummaries \
         --sequence-dictionary ~{ref_dict} \
         -I ~{sep=' -I ' input_tables} \
         -O ~{output_name}.tsv
     }
 
     runtime {
-        docker: runtime_params.gatk_docker
-        bootDiskSizeGb: runtime_params.boot_disk_size
-        memory: runtime_params.machine_mem + " MB"
-        disks: "local-disk " + runtime_params.disk + " HDD"
-        preemptible: runtime_params.preemptible
-        maxRetries: runtime_params.max_retries
-        cpu: runtime_params.cpu
+        backend:"Local"
     }
 
     output {
@@ -788,30 +701,19 @@ task MergePileupSummaries {
 task LearnReadOrientationModel {
     input {
       Array[File] f1r2_tar_gz
-      Runtime runtime_params
       Int? mem  #override memory
     }
 
-    Int machine_mem = select_first([mem, runtime_params.machine_mem])
-    Int command_mem = machine_mem - 1000
-
     command {
         set -e
-        export GATK_LOCAL_JAR=~{default="/root/gatk.jar" runtime_params.gatk_override}
 
-        gatk --java-options "-Xmx~{command_mem}m" LearnReadOrientationModel \
+        gatk LearnReadOrientationModel \
             -I ~{sep=" -I " f1r2_tar_gz} \
             -O "artifact-priors.tar.gz"
     }
 
     runtime {
-        docker: runtime_params.gatk_docker
-        bootDiskSizeGb: runtime_params.boot_disk_size
-        memory: machine_mem + " MB"
-        disks: "local-disk " + runtime_params.disk + " HDD"
-        preemptible: runtime_params.preemptible
-        maxRetries: runtime_params.max_retries
-        cpu: runtime_params.cpu
+      backend:"Local"
     }
 
     output {
@@ -825,26 +727,16 @@ task CalculateContamination {
       String? intervals
       File tumor_pileups
       File? normal_pileups
-      Runtime runtime_params
     }
 
     command {
         set -e
-
-        export GATK_LOCAL_JAR=~{default="/root/gatk.jar" runtime_params.gatk_override}
-
-        gatk --java-options "-Xmx~{runtime_params.command_mem}m" CalculateContamination -I ~{tumor_pileups} \
+        gatk  CalculateContamination -I ~{tumor_pileups} \
         -O contamination.table --tumor-segmentation segments.table ~{"-matched " + normal_pileups}
     }
 
     runtime {
-        docker: runtime_params.gatk_docker
-        bootDiskSizeGb: runtime_params.boot_disk_size
-        memory: runtime_params.machine_mem + " MB"
-        disks: "local-disk " + runtime_params.disk + " HDD"
-        preemptible: runtime_params.preemptible
-        maxRetries: runtime_params.max_retries
-        cpu: runtime_params.cpu
+      backend:"Local"
     }
 
     output {
@@ -868,9 +760,8 @@ task Filter {
       File? contamination_table
       File? maf_segments
       String? m2_extra_filtering_args
-
-      Runtime runtime_params
       Int? disk_space
+      String outdir
     }
 
     String output_vcf = output_name + if compress then ".vcf.gz" else ".vcf"
@@ -884,48 +775,40 @@ task Filter {
 
     command {
         set -e
-
-        export GATK_LOCAL_JAR=~{default="/root/gatk.jar" runtime_params.gatk_override}
-
-        gatk --java-options "-Xmx~{runtime_params.command_mem}m" FilterMutectCalls -V ~{unfiltered_vcf} \
+        mkdir -p ~{outdir}
+        gatk FilterMutectCalls -V ~{unfiltered_vcf} \
             -R ~{ref_fasta} \
-            -O ~{output_vcf} \
+            -O ~{outdir}/~{output_vcf} \
             ~{"--contamination-table " + contamination_table} \
             ~{"--tumor-segmentation " + maf_segments} \
             ~{"--ob-priors " + artifact_priors_tar_gz} \
             ~{"-stats " + mutect_stats} \
-            --filtering-stats filtering.stats \
             ~{m2_extra_filtering_args}
+
+        grep -E '#|PASS' ~{outdir}/~{output_vcf} > ~{outdir}/~{output_name}.pass.vcf
     }
 
     runtime {
-        docker: runtime_params.gatk_docker
-        bootDiskSizeGb: runtime_params.boot_disk_size
-        memory: runtime_params.machine_mem + " MB"
-        disks: "local-disk " + select_first([disk_space, runtime_params.disk]) + " HDD"
-        preemptible: runtime_params.preemptible
-        maxRetries: runtime_params.max_retries
-        cpu: runtime_params.cpu
+      backend:"Local"
     }
 
     output {
-        File filtered_vcf = "~{output_vcf}"
-        File filtered_vcf_idx = "~{output_vcf_idx}"
-        File filtering_stats = "filtering.stats"
+        File filtered_vcf = "~{outdir}/~{output_vcf}"
+        File filtered_vcf_idx = "~{outdir}/~{output_vcf_idx}"
+        File pass_filtered_vcf = "~{outdir}/~{output_name}.pass.vcf"
     }
 }
 
 task FilterAlignmentArtifacts {
     input {
       File input_vcf
-      File input_vcf_idx
+    #  File input_vcf_idx
       File bam
       File bai
       String output_name
       Boolean compress
       File realignment_index_bundle
       String? realignment_extra_args
-      Runtime runtime_params
       Int mem
     }
 
@@ -937,32 +820,23 @@ task FilterAlignmentArtifacts {
 
     parameter_meta{
       input_vcf: {localization_optional: true}
-      input_vcf_idx: {localization_optional: true}
+    #  input_vcf_idx: {localization_optional: true}
       bam: {localization_optional: true}
       bai: {localization_optional: true}
     }
 
     command {
         set -e
-
-        export GATK_LOCAL_JAR=~{default="/root/gatk.jar" runtime_params.gatk_override}
-
-        gatk --java-options "-Xmx~{command_mem}m" FilterAlignmentArtifacts \
+        gatk FilterAlignmentArtifacts \
             -V ~{input_vcf} \
             -I ~{bam} \
             --bwa-mem-index-image ~{realignment_index_bundle} \
             ~{realignment_extra_args} \
             -O ~{output_vcf}
     }
-
+        
     runtime {
-        docker: runtime_params.gatk_docker
-        bootDiskSizeGb: runtime_params.boot_disk_size
-        memory: machine_mem + " MB"
-        disks: "local-disk " + runtime_params.disk + " HDD"
-        preemptible: runtime_params.preemptible
-        maxRetries: runtime_params.max_retries
-        cpu: runtime_params.cpu
+      backend:"Local"
     }
 
     output {
@@ -977,15 +851,12 @@ task Funcotate {
        File ref_fai
        File ref_dict
        File input_vcf
-       File input_vcf_idx
        String reference_version
        String output_file_base_name
        String output_format
        Boolean compress
-       Boolean use_gnomad
        # This should be updated when a new version of the data sources is released
        # TODO: Make this dynamically chosen in the command.
-       File? data_sources_tar_gz = "gs://broad-public-datasets/funcotator/funcotator_dataSources.v1.6.20190124s.tar.gz"
        String? control_id
        String? case_id
        String? sequencing_center
@@ -1001,13 +872,14 @@ task Funcotate {
        String? extra_args
 
        # ==============
-       Runtime runtime_params
        Int? disk_space   #override to request more disk than default small task params
 
        # You may have to change the following two parameter values depending on the task requirements
        Int default_ram_mb = 3000
        # WARNING: In the workflow, you should calculate the disk space as an input to this task (disk_space_gb).  Please see [TODO: Link from Jose] for examples.
        Int default_disk_space_gb = 100
+       String funco_data_sources_path
+       String outdir
      }
 
      # ==============
@@ -1033,49 +905,24 @@ task Funcotate {
       ref_fai: {localization_optional: true}
       ref_dict: {localization_optional: true}
       input_vcf: {localization_optional: true}
-      input_vcf_idx: {localization_optional: true}
+   #   input_vcf_idx: {localization_optional: true}
      }
 
      command <<<
          set -e
-         export GATK_LOCAL_JAR=~{default="/root/gatk.jar" runtime_params.gatk_override}
-
-         # Extract our data sources:
-         echo "Extracting data sources zip file..."
-         mkdir datasources_dir
-         tar zxvf ~{data_sources_tar_gz} -C datasources_dir --strip-components 1
-         DATA_SOURCES_FOLDER="$PWD/datasources_dir"
-
-         # Handle gnomAD:
-         if ~{use_gnomad} ; then
-             echo "Enabling gnomAD..."
-             for potential_gnomad_gz in gnomAD_exome.tar.gz gnomAD_genome.tar.gz ; do
-                 if [[ -f ~{dollar}{DATA_SOURCES_FOLDER}/~{dollar}{potential_gnomad_gz} ]] ; then
-                     cd ~{dollar}{DATA_SOURCES_FOLDER}
-                     tar -zvxf ~{dollar}{potential_gnomad_gz}
-                     cd -
-                 else
-                     echo "ERROR: Cannot find gnomAD folder: ~{dollar}{potential_gnomad_gz}" 1>&2
-                     false
-                 fi
-             done
-         fi
-
          # Run Funcotator:
-         gatk --java-options "-Xmx~{runtime_params.command_mem}m" Funcotator \
-             --data-sources-path $DATA_SOURCES_FOLDER \
+         gatk Funcotator \
+             --data-sources-path ~{funco_data_sources_path} \
              --ref-version ~{reference_version} \
              --output-file-format ~{output_format} \
              -R ~{ref_fasta} \
              -V ~{input_vcf} \
-             -O ~{output_file} \
+             -O ~{outdir}/~{output_file} \
              ~{interval_list_arg} ~{default="" interval_list} \
              --annotation-default normal_barcode:~{default="Unknown" control_id} \
              --annotation-default tumor_barcode:~{default="Unknown" case_id} \
              --annotation-default Center:~{default="Unknown" sequencing_center} \
              --annotation-default source:~{default="Unknown" sequence_source} \
-             ~{"--transcript-selection-mode " + transcript_selection_mode} \
-             ~{transcript_selection_arg}~{default="" sep=" --transcript-list " transcript_selection_list} \
              ~{annotation_def_arg}~{default="" sep=" --annotation-default " annotation_defaults} \
              ~{annotation_over_arg}~{default="" sep=" --annotation-override " annotation_overrides} \
              ~{excluded_fields_args}~{default="" sep=" --exclude-field " funcotator_excluded_fields} \
@@ -1088,17 +935,11 @@ task Funcotate {
      >>>
 
     runtime {
-        docker: runtime_params.gatk_docker
-        bootDiskSizeGb: runtime_params.boot_disk_size
-        memory: runtime_params.machine_mem + " MB"
-        disks: "local-disk " + select_first([disk_space, runtime_params.disk]) + " HDD"
-        preemptible: runtime_params.preemptible
-        maxRetries: runtime_params.max_retries
-        cpu: runtime_params.cpu
+         backend:"Local"
     }
 
      output {
-         File funcotated_output_file = "~{output_file}"
-         File funcotated_output_file_index = "~{output_file_index}"
+         File funcotated_output_file = "~{outdir}/~{output_file}"
+       #  File funcotated_output_file_index = "~{outdir}/~{output_file_index}"
      }
 }
