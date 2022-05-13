@@ -102,7 +102,7 @@ workflow Mutect2 {
       String? sequencing_center
       String? sequence_source
       String? funco_reference_version
-      String funco_data_sources_path
+      String? funco_data_sources_path
       String? funco_transcript_selection_mode
       File? funco_transcript_selection_list
       Array[String]? funco_annotation_defaults
@@ -267,6 +267,7 @@ workflow Mutect2 {
             input_vcf_indices = M2.unfiltered_vcf_idx,
             output_name = unfiltered_name,
             compress = compress,
+            outdir = outdir
    
     }
 
@@ -304,7 +305,8 @@ workflow Mutect2 {
             input:
                 tumor_pileups = MergeTumorPileups.merged_table,
                 normal_pileups = MergeNormalPileups.merged_table,
-        }
+                outdir = outdir
+        }   
     }
 
     call Filter {
@@ -341,7 +343,8 @@ workflow Mutect2 {
         }
     }
 
-    if (run_funcotator_or_default) {
+    if (run_funcotator_or_default && defined(funco_data_sources_path)) {
+
         File funcotate_vcf_input = select_first([FilterAlignmentArtifacts.filtered_vcf, Filter.pass_filtered_vcf])
       #  File funcotate_vcf_input_index = select_first([FilterAlignmentArtifacts.filtered_vcf_idx, Filter.filtered_vcf_idx])
         call Funcotate {
@@ -594,6 +597,7 @@ task MergeVCFs {
       Array[File] input_vcf_indices
       String output_name
       Boolean compress
+      String outdir
     }
 
     String output_vcf = output_name + if compress then ".vcf.gz" else ".vcf"
@@ -603,7 +607,7 @@ task MergeVCFs {
     # WARNING 2015-10-28 15:01:48 GatherVcfs  Index creation not currently supported when gathering block compressed VCFs.
     command {
         set -e
-        gatk MergeVcfs -I ~{sep=' -I ' input_vcfs} -O ~{output_vcf}
+        gatk MergeVcfs -I ~{sep=' -I ' input_vcfs} -O ~{outdir}/~{output_vcf}
     }
 
     runtime {
@@ -611,8 +615,8 @@ task MergeVCFs {
     }
 
     output {
-        File merged_vcf = "~{output_vcf}"
-        File merged_vcf_idx = "~{output_vcf_idx}"
+        File merged_vcf = "~{outdir}/~{output_vcf}"
+        File merged_vcf_idx = "~{outdir}/~{output_vcf_idx}"
     }
 }
 
@@ -727,12 +731,13 @@ task CalculateContamination {
       String? intervals
       File tumor_pileups
       File? normal_pileups
+      String outdir
     }
 
     command {
         set -e
         gatk  CalculateContamination -I ~{tumor_pileups} \
-        -O contamination.table --tumor-segmentation segments.table ~{"-matched " + normal_pileups}
+        -O ~{outdir}/contamination.table --tumor-segmentation segments.table ~{"-matched " + normal_pileups}
     }
 
     runtime {
@@ -740,7 +745,7 @@ task CalculateContamination {
     }
 
     output {
-        File contamination_table = "contamination.table"
+        File contamination_table = "~{outdir}/contamination.table"
         File maf_segments = "segments.table"
     }
 }
@@ -878,8 +883,8 @@ task Funcotate {
        Int default_ram_mb = 3000
        # WARNING: In the workflow, you should calculate the disk space as an input to this task (disk_space_gb).  Please see [TODO: Link from Jose] for examples.
        Int default_disk_space_gb = 100
-       String funco_data_sources_path
-       String outdir
+       String? funco_data_sources_path
+       String? outdir
      }
 
      # ==============
