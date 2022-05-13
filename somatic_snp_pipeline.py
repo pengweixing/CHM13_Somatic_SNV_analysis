@@ -66,8 +66,10 @@ def init_json(args,main_dir):
         alldict['Mutect2.intervals'] = main_dir+"/wgs_calling_regions.hg38.intervals"
     elif args.reference == 'hg19':
         alldict['Mutect2.intervals'] = main_dir+"/b37_wgs_consolidated_calling_intervals.list"
+    elif args.reference == 'CHM13':
+        alldict['Mutect2.intervals'] = main_dir+"/CHM13.interval.txt"
     else:
-        raise RuntimeError("the reference genonme should be hg38 or hg19")
+        raise RuntimeError("the reference genonme should be hg38 or hg19 or CHM13")
 
     return alldict
 
